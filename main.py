@@ -18,6 +18,24 @@ EDGE_VOICES = {
     "Polina (жіночий)": "uk-UA-PolinaNeural"
 }
 
+# MMS TTS (Meta)
+MMS_VOICE = {
+    "Meta MMS (український)": "facebook/mms-tts-ukr"
+}
+
+# UA-ESPNET голоси 
+ESPNET_VOICES = {
+    "Тетяна (жіночий)": "Тетяна (жіночий) 👩",
+    "Микита (чоловічий)": "Микита (чоловічий) 👨",
+    "Лада (жіночий)": "Лада (жіночий) 👩",
+    "Дмитро (чоловічий)": "Дмитро (чоловічий) 👨",
+    "Олекса (чоловічий)": "Олекса (чоловічий) 👨"
+}
+
+# Глобальна змінна для MMS моделі (завантажується один раз)
+MMS_MODEL = None
+MMS_PROCESSOR = None
+
 # Пошук Piper моделей
 def find_piper_models():
     """Знаходить завантажені моделі Piper з інформацією про спікерів"""
@@ -159,8 +177,80 @@ def piper_tts_synthesize(text, output_file, model_path, config_path, speaker_id=
     except Exception as e:
         raise Exception(f"Piper TTS помилка: {e}")
 
+def mms_tts_synthesize(text, output_file, model=None, processor=None):
+    """Озвучує текст через MMS TTS"""
+    try:
+        from transformers import VitsModel, AutoTokenizer
+        import torch
+        import scipy.io.wavfile
+        import numpy as np
+        
+        # Ініціалізація моделі (якщо ще не завантажена)
+        if model is None or processor is None:
+            model = VitsModel.from_pretrained("facebook/mms-tts-ukr")
+            processor = AutoTokenizer.from_pretrained("facebook/mms-tts-ukr")
+        
+        # Генерація аудіо
+        inputs = processor(text=text, return_tensors="pt")
+        
+        with torch.no_grad():
+            outputs = model(**inputs)
+        
+        waveform = outputs.waveform[0].cpu().numpy()
+        
+        # Зберігаємо як WAV
+        temp_wav = output_file.replace('.mp3', '_temp_mms.wav')
+        scipy.io.wavfile.write(temp_wav, rate=16000, data=waveform)
+        
+        # Конвертуємо WAV в MP3
+        convert_cmd = [
+            'ffmpeg', '-i', temp_wav, '-codec:a', 'libmp3lame',
+            '-qscale:a', '2', '-y', output_file
+        ]
+        subprocess.run(convert_cmd, capture_output=True, check=True)
+        
+        # Видаляємо тимчасовий WAV
+        os.remove(temp_wav)
+        
+        return True
+    except Exception as e:
+        raise Exception(f"MMS TTS помилка: {e}")
+
+def espnet_tts_synthesize(text, output_file, speaker="female"):
+    """Озвучує текст через UA-ESPNET Gradio API"""
+    try:
+        from gradio_client import Client
+        
+        # Підключаємося до Space
+        client = Client("robinhad/ukrainian-tts")
+        
+        # Викликаємо API без api_name (використовуємо перший endpoint)
+        result = client.predict(
+            text,  # text
+            speaker  # speaker
+        )
+        
+        # result може бути кортежем, беремо перший елемент
+        audio_path = result[0] if isinstance(result, tuple) else result
+        
+        if audio_path and os.path.exists(audio_path):
+            # Конвертуємо WAV в MP3
+            convert_cmd = [
+                'ffmpeg', '-i', audio_path, '-codec:a', 'libmp3lame',
+                '-qscale:a', '2', '-y', output_file
+            ]
+            subprocess.run(convert_cmd, capture_output=True, check=True)
+            return True
+        else:
+            raise Exception("API не повернув файл")
+            
+    except Exception as e:
+        raise Exception(f"UA-ESPNET помилка: {e}")
+
 def text_to_speech(text, output_file, engine_type, voice_id):
     """Універсальна функція озвучки"""
+    global MMS_MODEL, MMS_PROCESSOR
+    
     try:
         if engine_type == "edge":
             return asyncio.run(edge_tts_synthesize(text, output_file, voice_id))
@@ -173,6 +263,14 @@ def text_to_speech(text, output_file, engine_type, voice_id):
                 model_info["config"],
                 model_info.get("speaker")
             )
+        elif engine_type == "mms":
+            if MMS_MODEL is None:
+                from transformers import VitsModel, AutoTokenizer
+                MMS_MODEL = VitsModel.from_pretrained("facebook/mms-tts-ukr")
+                MMS_PROCESSOR = AutoTokenizer.from_pretrained("facebook/mms-tts-ukr")
+            return mms_tts_synthesize(text, output_file, MMS_MODEL, MMS_PROCESSOR)
+        elif engine_type == "espnet":
+            return espnet_tts_synthesize(text, output_file, voice_id)
     except Exception as e:
         raise e
 
@@ -500,7 +598,7 @@ class SRTVoiceApp:
     def __init__(self, root):
         self.root = root
         self.root.title("SRT Voice App - Українська озвучка")
-        self.root.geometry("650x700")
+        self.root.geometry("750x700")
         self.root.resizable(False, False)
         
         self.srt_file = None
@@ -533,20 +631,31 @@ class SRTVoiceApp:
         engine_label.pack(side=tk.LEFT)
         
         self.engine_var = tk.StringVar(value="edge")
-        
+
         edge_rb = tk.Radiobutton(engine_frame, text="Edge TTS (онлайн)", 
-                                 variable=self.engine_var, value="edge",
-                                 command=self.update_voice_list)
+                                variable=self.engine_var, value="edge",
+                                command=self.update_voice_list)
         edge_rb.pack(side=tk.LEFT, padx=10)
-        
+
         if PIPER_MODELS:
             piper_rb = tk.Radiobutton(engine_frame, text="Piper TTS (офлайн)", 
-                                     variable=self.engine_var, value="piper",
-                                     command=self.update_voice_list)
+                                    variable=self.engine_var, value="piper",
+                                    command=self.update_voice_list)
             piper_rb.pack(side=tk.LEFT, padx=10)
         else:
             piper_label = tk.Label(engine_frame, text="(Piper моделі не знайдено)", fg="gray")
             piper_label.pack(side=tk.LEFT, padx=10)
+
+        mms_rb = tk.Radiobutton(engine_frame, text="MMS TTS (Meta)", 
+                            variable=self.engine_var, value="mms",
+                            command=self.update_voice_list)
+        mms_rb.pack(side=tk.LEFT, padx=10)
+
+        # кнопка для ESPNET
+        espnet_rb = tk.Radiobutton(engine_frame, text="ESPNET", 
+                                variable=self.engine_var, value="espnet",
+                                command=self.update_voice_list)
+        espnet_rb.pack(side=tk.LEFT, padx=10)
         
         # Поле для цільової тривалості
         duration_frame = tk.Frame(root)
@@ -627,8 +736,14 @@ class SRTVoiceApp:
         
         if engine == "edge":
             voices = list(EDGE_VOICES.keys())
-        else:
+        elif engine == "piper":
             voices = list(PIPER_MODELS.keys())
+        elif engine == "mms":
+            voices = list(MMS_VOICE.keys())
+        elif engine == "espnet":
+            voices = list(ESPNET_VOICES.keys())
+        else:
+            voices = []
         
         self.voice_menu['values'] = voices
         if voices:
@@ -763,6 +878,10 @@ class SRTVoiceApp:
             try:
                 if engine == "edge":
                     voice_id = EDGE_VOICES[voice_name]
+                elif engine == "mms":
+                    voice_id = MMS_VOICE[voice_name]
+                elif engine == "espnet":
+                    voice_id = ESPNET_VOICES[voice_name]
                 else:
                     voice_id = voice_name
                 
@@ -829,6 +948,10 @@ class SRTVoiceApp:
         
         if engine == "edge":
             voice_id = EDGE_VOICES[voice_name]
+        elif engine == "mms":
+            voice_id = MMS_VOICE[voice_name]
+        elif engine == "espnet":
+            voice_id = ESPNET_VOICES[voice_name]
         else:
             voice_id = voice_name
         

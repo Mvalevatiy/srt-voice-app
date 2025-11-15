@@ -1,3 +1,6 @@
 pysrt==1.1.2
-pydub==0.25.1
-edge-tts==6.1.9
+edge_tts==6.1.9
+transformers==4.35.0
+torch==2.1.0
+scipy==1.11.4
+pip install gradio_client
